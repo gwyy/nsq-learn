@@ -93,6 +93,9 @@ func (cfg config) Validate() {
 	}
 }
 
+/**
+注入用户命令
+ */
 func nsqdFlagSet(opts *nsqd.Options) *flag.FlagSet {
 	flagSet := flag.NewFlagSet("nsqd", flag.ExitOnError)
 

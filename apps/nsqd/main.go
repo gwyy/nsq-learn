@@ -22,6 +22,12 @@ import (
 	// nsqd真正工作的区域
 	"github.com/nsqio/nsq/nsqd"
 )
+
+
+/**
+pub:  http://127.0.0.1:4151/pub?topic=name
+ */
+
 /*
 定义业务program结构体
 */
@@ -52,8 +58,8 @@ func main() {
 	    // Windows Service is stopped.
 	    Stop() error
 	}
-	    svc 第一个参数需要实现Service接口才可以正常运行，这也就是大伙看到的program 实现的init/start/stop三个函数
-
+	    svc 第一个参数需要实现Service接口才可以正常运行，
+	    所以这也就是大伙看到的program 实现的init/start/stop三个函数
 	    使用svc启动相关程序 监听关闭信号
 	*/
 	if err := svc.Run(prg, syscall.SIGINT, syscall.SIGTERM); err != nil {
@@ -83,7 +89,7 @@ func (p *program) Start() error {
 	*/
 	flagSet := nsqdFlagSet(opts)
 	flagSet.Parse(os.Args[1:])  //解析用户传参
-	// 生成随机数 time.Now().UnixNano()  单位纳秒
+	// 初始化load 随机数种子 time.Now().UnixNano()  单位纳秒
 	rand.Seed(time.Now().UTC().UnixNano())
 	// 打印版本号,接收命令行参数version  默认值：false 然后直接结束
 	/*
@@ -140,6 +146,10 @@ func (p *program) Start() error {
 	   3、遍历 for _, t := range m.Topics ， 解析每个topic -> channel
 	   4、启动N个topic.Start()（重点代码中有一个GetTopic，采用线程线程安全方式，重点学习）
 	   5、func (n *NSQD) LoadMetadata() error
+	加载 nsqd.dat 中的数据
+	遍历所有的 topic,对暂停服务的 topic 设置暂停标识
+	将这个 topic 中的所有 channel 添加,对暂停服务的 channel 设置暂停标识
+
 	*/
 	err = p.nsqd.LoadMetadata()
 	if err != nil {
@@ -151,6 +161,15 @@ func (p *program) Start() error {
 	   2、遍历 nsqd.topicMap -> ndqd.channelMap  ,这是对topicMap和channelMap加了互斥锁
 	   3、将最新数据写入到临时文件中，明文明文件名为：nsqd.dat.333569681738193261.tmp
 	   4、func (n *NSQD) PersistMetadata() error
+
+	加载完之后立即进行数据的存储,不保存临时 topic 和 channel,流程如下:
+
+	遍历所有 topic 保存起来
+	遍历每个 topic 下的所有 channel
+	头部加上 version 版本号
+	保存到 nsqd.dat 文件中
+	加载完立刻存储可能是为了更新 nsqd.dat 文件中的信息,因为在加载的过程中可能会对原有信息做一些改变,下面是 nsqd.dat 中的数据结构
+
 	*/
 	err = p.nsqd.PersistMetadata()
 	if err != nil {
