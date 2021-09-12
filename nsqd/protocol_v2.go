@@ -17,6 +17,47 @@ import (
 	"github.com/nsqio/nsq/internal/version"
 )
 
+/**
+
+nsqd/protocol_v2.go文件，protocolV2负责处理过来的具体的用户请求。
+每个连接均会创建一个独立的protocolV2实例（由tcpServer.Handle()创建）
+
+
+
+自定义 protocol、魔法字符串 magicStr 进行通信、版本控制：
+
+通信协议
+
+nsqd
+
+FIN - 消息消费完成
+RDY - 客户端连接就绪
+REQ - 消息重放入队
+PUB - 发布一条消息
+MPUB - 发布多条消息
+DPUB - 发布一条延时消息
+NOP - 空操作
+TOUCH - 重置消息过期时间
+SUB - 消费者订阅 Topic/Channel
+CLS - 超时关闭连接CLOSE_WAIT
+AUTH - 权限认证
+
+nsqlookupd
+
+PING - 心跳检测
+IDENTIFY - 权限与协议校验
+REGISTER - nsqd节点注册
+UNREGISTER - nsqd节点注销
+
+
+
+版本控制
+
+nsqd - “ V2” (4 byte)
+nsqlookupd - “ V1” (4 byte)
+
+ */
+
 const maxTimeout = time.Hour
 
 const (
@@ -32,14 +73,24 @@ var okBytes = []byte("OK")
 type protocolV2 struct {
 	ctx *context
 }
-//
+
+/*
+   tcpServer.Handle()阻塞调用本方法
+   1. 启用一个独立协程向消费者推送消息protocolV2.messagePump()
+   2. for循环接收并处理客户端请求protocolV2.Exec()
+*/
+
+//通过内部协议进行 p.Exec （执行命令）、 p.Send （发送结果），
+//保证每个 nsqd 节点都能正确的进行消息生成与消费，一旦上述过程有 error 都会被捕获处理，确保分布式投递的可靠性；
 func (p *protocolV2) IOLoop(conn net.Conn) error {
 	var err error
 	var line []byte
 	var zeroTime time.Time
-
+	// 获取一个 ClientID
 	clientID := atomic.AddInt64(&p.ctx.nsqd.clientIDSequence, 1)
+	// 创建一个 client 用来代理这个客户端
 	client := newClientV2(clientID, conn, p.ctx)
+	// 将这个客户端添加到 nsqd 中进行管理
 	p.ctx.nsqd.AddClient(client.ID, client)
 
 	// synchronize the startup of messagePump in order
@@ -47,11 +98,19 @@ func (p *protocolV2) IOLoop(conn net.Conn) error {
 	// goroutine local state derived from client attributes
 	// and avoid a potential race with IDENTIFY (where a client
 	// could have changed or disabled said attributes)
+
+	// 首先创建一个 messagePumpStartedChan channel,并把它传入到 messagePump 中
+	// 下面阻塞在从 messagePumpStartedChan 中获取消息,但其实这个 channel 在 messagePump 中关闭了
+	// 这是为了保证让 IOLoop 中的 for 循环和 messagePump 中的 for 循环同步运行.
+	// IOLoop 中的 for 循环时接收客户端的请求并进行解析,处理请求,最后给客户端响应.
+	// messagePump 中的 for 循环会从内存和 disk 中获取准备好的 message 返回给客户.
+	// 如果不添加 messagePumpStartedChan 一般会导致 IOLoop 中的 for 循环先执行,但是 messagePump 还没有准备好
 	messagePumpStartedChan := make(chan bool)
 	go p.messagePump(client, messagePumpStartedChan)
 	<-messagePumpStartedChan
 
 	for {
+		// 根据心跳间隔设置 ReadDeadline 时间
 		if client.HeartbeatInterval > 0 {
 			client.SetReadDeadline(time.Now().Add(client.HeartbeatInterval * 2))
 		} else {
@@ -60,6 +119,7 @@ func (p *protocolV2) IOLoop(conn net.Conn) error {
 
 		// ReadSlice does not allocate new space for the data each request
 		// ie. the returned slice is only valid until the next call to it
+		// 读取一个指令
 		line, err = client.Reader.ReadSlice('\n')
 		if err != nil {
 			if err == io.EOF {
@@ -71,17 +131,20 @@ func (p *protocolV2) IOLoop(conn net.Conn) error {
 		}
 
 		// trim the '\n'  去掉 \n
+		// 删除指令末尾的 '\n'
 		line = line[:len(line)-1]
 		// optionally trim the '\r'
+		// 可能还需要修剪一下 '\r'
 		if len(line) > 0 && line[len(line)-1] == '\r' {
 			line = line[:len(line)-1]
 		}
+		// 按照空格进行划分
 		params := bytes.Split(line, separatorBytes)
 
 		p.ctx.nsqd.logf(LOG_DEBUG, "PROTOCOL(V2): [%s] %s", client, params)
 
 		var response []byte
-		//具体执行
+		//具体执行		// 执行客户端对应的操作,✨✨✨
 		response, err = p.Exec(client, params)
 		if err != nil {
 			ctx := ""
@@ -89,20 +152,22 @@ func (p *protocolV2) IOLoop(conn net.Conn) error {
 				ctx = " - " + parentErr.Error()
 			}
 			p.ctx.nsqd.logf(LOG_ERROR, "[%s] - %s%s", client, err, ctx)
-
+			// 将错误发送给客户端
 			sendErr := p.Send(client, frameTypeError, []byte(err.Error()))
 			if sendErr != nil {
 				p.ctx.nsqd.logf(LOG_ERROR, "[%s] - %s%s", client, sendErr, ctx)
 				break
 			}
 
+			// FatalClientErr 类型的错误应关闭连接
 			// errors of type FatalClientErr should forceably close the connection
 			if _, ok := err.(*protocol.FatalClientErr); ok {
 				break
 			}
 			continue
 		}
-
+		//发送结果
+		// 将执行后的结果返回给客户端
 		if response != nil {
 			err = p.Send(client, frameTypeResponse, response)
 			if err != nil {
@@ -111,27 +176,30 @@ func (p *protocolV2) IOLoop(conn net.Conn) error {
 			}
 		}
 	}
+	// 退出循环
 
 	p.ctx.nsqd.logf(LOG_INFO, "PROTOCOL(V2): [%s] exiting ioloop", client)
 	conn.Close()
+	// 关闭 client 的所有监听 goroutine
 	close(client.ExitChan)
 	if client.Channel != nil {
+		// 如果客户端监听的 channel 不为空,从 channel 移除这个客户端
 		client.Channel.RemoveClient(client.ID)
 	}
-
+	// 从 nsqd 移除这个客户端
 	p.ctx.nsqd.RemoveClient(client.ID)
 	return err
 }
-
+// 组装消息并调用protocolV2.Send()发送给消费者
 func (p *protocolV2) SendMessage(client *clientV2, msg *Message) error {
 	p.ctx.nsqd.logf(LOG_DEBUG, "PROTOCOL(V2): writing msg(%s) to client(%s) - %s", msg.ID, client, msg.Body)
 	var buf = &bytes.Buffer{}
-
+	// 消息放到 buf 中
 	_, err := msg.WriteTo(buf)
 	if err != nil {
 		return err
 	}
-
+	// 调用 Send 发送
 	err = p.Send(client, frameTypeMessage, buf.Bytes())
 	if err != nil {
 		return err
@@ -139,11 +207,12 @@ func (p *protocolV2) SendMessage(client *clientV2, msg *Message) error {
 
 	return nil
 }
-
+// 向客户端发送数据帧
 func (p *protocolV2) Send(client *clientV2, frameType int32, data []byte) error {
 	client.writeLock.Lock()
 
 	var zeroTime time.Time
+	// 写超时设置
 	if client.HeartbeatInterval > 0 {
 		client.SetWriteDeadline(time.Now().Add(client.HeartbeatInterval))
 	} else {
@@ -155,7 +224,8 @@ func (p *protocolV2) Send(client *clientV2, frameType int32, data []byte) error 
 		client.writeLock.Unlock()
 		return err
 	}
-
+	// frameTypeMessage : 发送给客户端的消息立即刷新
+	// frameTypeResponse : 客户端指令返回不会立即刷新
 	if frameType != frameTypeMessage {
 		err = client.Flush()
 	}
@@ -164,8 +234,29 @@ func (p *protocolV2) Send(client *clientV2, frameType int32, data []byte) error 
 
 	return err
 }
+//执行命令
+// 解析客户端请求的指令，调用对应的指令方法
+// 执行客户端传递过来的指令
 
+/**
+FIN	FIN MessageID	确认收到一条消息	topic.FinishMessage
+RDY	RDY count	指定可同时处理的消息数量	client.SetReadyCount
+REQ	REQ messageID timeoutMs	消息重新加入 channel 发送	client.Channel.RequeueMessage
+PUB	PUB topicName message	向 topic 推送一条消息	topic.PutMessage
+MPUB	MPUB topicName messages	向 topic 推送多条消息	topic.PutMessages
+DPUB	MPUB topicName timeoutMs message	向 topic 推送一条延迟消息	topic.PutMessage
+NOP	NOP	无效指令	不做处理
+TOUCH	TOUCH messageID	重置一个待确认消息的超时时间	client.Channel.TouchMessage
+SUB	SUB topicName channelName	订阅一个 channel	client.SubEventChan <- channel 触发消息循环
+CLS	CLS	关闭客户端	client.StartClose
+AUTH	AUTH body	授权一个客户端	client.Auth
+IDENTIFY	IDENTIFY body	认证一个客户端	client.Identify
+这里面比较特别的是 IDENTIFY 和 AUTH 两个操作.
+client 和 nsqd 建立连接后,client 立即通过命令 IDENTIFY 将认证信息发给 nsqd,如果 nsqd 在启动的时候指定了授权地址,
+nsqd 就会告诉 client 你需要认证,client 就会通过命令 AUTH 将秘钥发给 nsqd,nsqd 去授权地址进行验证,验证通过后,就可以进行正常的消息发布和订阅了
+ */
 func (p *protocolV2) Exec(client *clientV2, params [][]byte) ([]byte, error) {
+	// 认证一个客户端
 	if bytes.Equal(params[0], []byte("IDENTIFY")) {
 		return p.IDENTIFY(client, params)
 	}
@@ -174,40 +265,47 @@ func (p *protocolV2) Exec(client *clientV2, params [][]byte) ([]byte, error) {
 		return nil, err
 	}
 	switch {
+	// 确认收到一条消息
 	case bytes.Equal(params[0], []byte("FIN")):
 		return p.FIN(client, params)
+		// 指定可同时处理的消息数量
 	case bytes.Equal(params[0], []byte("RDY")):
 		return p.RDY(client, params)
-	case bytes.Equal(params[0], []byte("REQ")):
+	case bytes.Equal(params[0], []byte("REQ")):  // 消息重新加入 channel 发送
 		return p.REQ(client, params)
-	case bytes.Equal(params[0], []byte("PUB")):
+	case bytes.Equal(params[0], []byte("PUB")):  	// 向 topic 推送一条消息
 		return p.PUB(client, params)
-	case bytes.Equal(params[0], []byte("MPUB")):
+	case bytes.Equal(params[0], []byte("MPUB")):  	// 向 topic 推送多条消息
 		return p.MPUB(client, params)
-	case bytes.Equal(params[0], []byte("DPUB")):
+	case bytes.Equal(params[0], []byte("DPUB")): 	// 向 topic 推送一条延迟消息
 		return p.DPUB(client, params)
-	case bytes.Equal(params[0], []byte("NOP")):
+	case bytes.Equal(params[0], []byte("NOP")):  	// 不作处理
 		return p.NOP(client, params)
-	case bytes.Equal(params[0], []byte("TOUCH")):
+	case bytes.Equal(params[0], []byte("TOUCH")): 	// 重置一个待确认消息的超时时间
 		return p.TOUCH(client, params)
-	case bytes.Equal(params[0], []byte("SUB")):
+	case bytes.Equal(params[0], []byte("SUB")):  	// 订阅一个 channel
 		return p.SUB(client, params)
-	case bytes.Equal(params[0], []byte("CLS")):
+	case bytes.Equal(params[0], []byte("CLS")):  	// 关闭客户端
 		return p.CLS(client, params)
-	case bytes.Equal(params[0], []byte("AUTH")):
+	case bytes.Equal(params[0], []byte("AUTH")): 	// 授权一个客户端
 		return p.AUTH(client, params)
 	}
 	return nil, protocol.NewFatalClientErr(nil, "E_INVALID", fmt.Sprintf("invalid command %s", params[0]))
 }
-
+// 负责向消费者推送消息
+//和 IOLoop 同步执行的还有 messagePump,是用来将内存和 disk 中获取准备好的 message 返回给客户.
 func (p *protocolV2) messagePump(client *clientV2, startedChan chan bool) {
 	var err error
+	// 从内存获取消息的通道
 	var memoryMsgChan chan *Message
+	// 从磁盘获取消息的通道
 	var backendMsgChan <-chan []byte
+	// 订阅的频道
 	var subChannel *Channel
 	// NOTE: `flusherChan` is used to bound message latency for
 	// the pathological case of a channel on a low volume topic
 	// with >1 clients having >1 RDY counts
+	// 解决消息延迟的问题,强制刷新
 	var flusherChan <-chan time.Time
 	var sampleRate int32
 
@@ -224,18 +322,35 @@ func (p *protocolV2) messagePump(client *clientV2, startedChan chan bool) {
 	//    2. we're buffered and the channel has nothing left to send us
 	//       (ie. we would block in this loop anyway)
 	//
+	// 用来强制刷新消息给客户端,两种情况不会进行强制刷新:
+	// 1. 客户端没有准备好接收消息
+	// 2. buffer 中没有消息,怎么刷都没用
 	flushed := true
 
 	// signal to the goroutine that started the messagePump
 	// that we've started up
+	// 通知 IOLoop 开始执行
 	close(startedChan)
-
+	//到这里 messagePump 的准备工作就已经做完了,最后 close startedChan 同时启动 IOLoop 和 messagePump 中的 for 循环
+	/*
+	在这个 for 循环中,每次开始执行 select 之前需要先对客户端的情况进行判断,有如下三种情况:
+	客户端没有订阅 channel 或者客户端还没有准备好接收消息,在 select 中等待 subEventChan 和 ReadyStateChan 的消息,
+	用来加载 客户端订阅的 channel 消息通道和知晓客户端已经准备好接受消息.
+	客户端可以接受消息,但是 channel 中已经没有消息了,不需要开启强制刷新,仅从 channel 的两个通道中正常获取消息即可
+	客户端可以接收消息,并且 channel 中有很多消息等待投递,可以打开 flusherChan 进行手动刷新
+	这里处理初始化时属于第一种情况,订阅 channel 后就一直在 2,3 之间进行切换.是怎么判断 channel 的通道中是否有消息需要进行强制刷新呢?
+	如果从内存通道中获取消息就表示目前 channel 情况还正常,一旦开始从 backend 中获取消息就表示 channel 中已经积压了大量的消息,
+	需要打开强制刷新.默认刷新频率为:250ms,通过强制刷新把 client 写缓冲区中的消息推送给客户端,让 client 可以更快的从 channel 中获取消息
+	*/
 	for {
 		if subChannel == nil || !client.IsReadyForMessages() {
 			// the client is not ready to receive messages...
+			// 客户端暂时还不能接收消息
 			memoryMsgChan = nil
 			backendMsgChan = nil
+			// 不允许强制刷消息给客户端
 			flusherChan = nil
+			// 强制刷新客户端
 			// force flush
 			client.writeLock.Lock()
 			err = client.Flush()
@@ -245,12 +360,14 @@ func (p *protocolV2) messagePump(client *clientV2, startedChan chan bool) {
 			}
 			flushed = true
 		} else if flushed {
+			// channel 中不是很堵,暂时关闭强制刷新,仅接收 channel 内存通道和磁盘通道即可
 			// last iteration we flushed...
 			// do not select on the flusher ticker channel
 			memoryMsgChan = subChannel.memoryMsgChan
 			backendMsgChan = subChannel.backend.ReadChan()
 			flusherChan = nil
 		} else {
+			// channel 中有大消息,打开强制刷新定时器
 			// we're buffered (if there isn't any more data we should flush)...
 			// select on the flusher ticker channel, too
 			memoryMsgChan = subChannel.memoryMsgChan
@@ -258,8 +375,21 @@ func (p *protocolV2) messagePump(client *clientV2, startedChan chan bool) {
 			flusherChan = outputBufferTicker.C
 		}
 
+		/*
+		整个阻塞在 select 有 8 种情况:
+			强制刷新消息给客户端
+			客户端准备就绪等待接收消息
+			客户端订阅频道,加载 channel 消息接收列表(仅能订阅一次 channel)
+			验证链接时执行的操作,设置消息循环的各种定时器间隔(只可以确认一次)
+			给客户端发送心跳消息
+			从磁盘队列接收消息
+			从内存队列接收消息
+			退出 messagePump
+		*/
+
 		select {
 		case <-flusherChan:
+			// 强制刷新 client 的写缓冲区
 			// if this case wins, we're either starved
 			// or we won the race between other channels...
 			// in either case, force flush
@@ -272,9 +402,12 @@ func (p *protocolV2) messagePump(client *clientV2, startedChan chan bool) {
 			flushed = true
 		case <-client.ReadyStateChan:
 		case subChannel = <-subEventChan:
+			// 仅订阅一次 channel 之后即使调用 SUB 也不会切换频道
 			// you can't SUB anymore
 			subEventChan = nil
 		case identifyData := <-identifyEventChan:
+			// 验证确认客户端,仅触发一次
+			// 就是设置各种触发间隔
 			// you can't IDENTIFY anymore
 			identifyEventChan = nil
 
@@ -296,14 +429,16 @@ func (p *protocolV2) messagePump(client *clientV2, startedChan chan bool) {
 
 			msgTimeout = identifyData.MsgTimeout
 		case <-heartbeatChan:
+			// 发送心跳消息给客户端
 			err = p.Send(client, frameTypeResponse, heartbeatBytes)
 			if err != nil {
 				goto exit
 			}
-		case b := <-backendMsgChan:
+		case b := <-backendMsgChan: // 从 channel 磁盘消息缓冲区中接收消息
 			if sampleRate > 0 && rand.Int31n(100) > sampleRate {
 				continue
 			}
+			// 先 decode 消息
 
 			msg, err := decodeMessage(b)
 			if err != nil {
@@ -311,7 +446,7 @@ func (p *protocolV2) messagePump(client *clientV2, startedChan chan bool) {
 				continue
 			}
 			msg.Attempts++
-
+			// 放进到待确认列表并发送给客户端
 			subChannel.StartInFlightTimeout(msg, client.ID, msgTimeout)
 			client.SendingMessage()
 			err = p.SendMessage(client, msg)
@@ -319,12 +454,12 @@ func (p *protocolV2) messagePump(client *clientV2, startedChan chan bool) {
 				goto exit
 			}
 			flushed = false
-		case msg := <-memoryMsgChan:
+		case msg := <-memoryMsgChan:  // 从 channel 内存消息缓冲区中接收消息
 			if sampleRate > 0 && rand.Int31n(100) > sampleRate {
 				continue
 			}
 			msg.Attempts++
-
+			// 添加到待确认列表并发送给客户端
 			subChannel.StartInFlightTimeout(msg, client.ID, msgTimeout)
 			client.SendingMessage()
 			err = p.SendMessage(client, msg)
@@ -332,10 +467,13 @@ func (p *protocolV2) messagePump(client *clientV2, startedChan chan bool) {
 				goto exit
 			}
 			flushed = false
-		case <-client.ExitChan:
+		case <-client.ExitChan:		// 退出循环
 			goto exit
 		}
 	}
+
+	//收尾工作就是停止几个定时器并退出即可.在 messagePump 中获取了消息之后会调用 SendMessage 来吧消息发送给客户端:
+
 
 exit:
 	p.ctx.nsqd.logf(LOG_INFO, "PROTOCOL(V2): [%s] exiting messagePump", client)
@@ -487,6 +625,7 @@ func (p *protocolV2) IDENTIFY(client *clientV2, params [][]byte) ([]byte, error)
 
 	return nil, nil
 }
+// 下面这组方法是NSQD支持的指令对应的处理方法
 
 func (p *protocolV2) AUTH(client *clientV2, params [][]byte) ([]byte, error) {
 	if atomic.LoadInt32(&client.State) != stateInit {

@@ -37,10 +37,10 @@ type httpServer struct {
 	tlsRequired bool
 	router      http.Handler
 }
-
+// 创建一个新的 HTTP server 并注册路由规则
 func newHTTPServer(ctx *context, tlsEnabled bool, tlsRequired bool) *httpServer {
 	log := http_api.Log(ctx.nsqd.logf)
-
+	//使用了第三方库 httprouter
 	router := httprouter.New()
 	router.HandleMethodNotAllowed = true
 	router.PanicHandler = http_api.LogPanicHandler(ctx.nsqd.logf)
@@ -53,6 +53,28 @@ func newHTTPServer(ctx *context, tlsEnabled bool, tlsRequired bool) *httpServer 
 		router:      router,
 	}
 
+	/**
+	从路由 router.Handle("GET", "/ping", http_api.Decorate(s.pingHandler, log, http_api.PlainText))，
+	可以看出 httpServer 通过 http_api.Decorate 装饰器实现对各 http 路由进行 handler 装饰，如加 log 日志、V1 协议版本号的统一格式输出等；
+
+	GET: ping // 类似于 keep_alive 用来获取 nsqd 的 healthy 状态
+	GET: info // 获取 nsqd 的基础信息
+	POST: pub // 向 topic 推送一条消息
+	POST: mpub // 向 topic 推送多条消息
+	GET: stats // 获取 nsqd 的统计信息(版本,开始时间,topics 等等)
+	POST: /topic/create // 创建一个 topic
+	POST: /topic/delete // 删除一个 topic
+	POST: /topic/empty // 清空一个 topic
+	POST: /topic/pause // 暂停一个 topic
+	POST: /topic/unpause // 恢复一个 topic
+	POST: /channel/create // 创建一个 channel
+	POST: /channel/delete // 删除一个 channel
+	POST: /channel/empty // 清空一个 channel
+	POST: /channel/pause // 暂停一个 channel
+	POST: /channel/unpause // 恢复一个 channel
+	GET: /config/:opt // 获取 nsqd 的 options
+	PUT: /config/:opt // 更新 nsqd 的 options
+	*/
 	router.Handle("GET", "/ping", http_api.Decorate(s.pingHandler, log, http_api.PlainText))
 	router.Handle("GET", "/info", http_api.Decorate(s.doInfo, log, http_api.V1))
 

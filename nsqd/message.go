@@ -7,9 +7,9 @@ import (
 	"io"
 	"time"
 )
-
+// 消息定义
 const (
-	MsgIDLength       = 16
+	MsgIDLength       = 16  // ID 长度
 	minValidMsgLength = MsgIDLength + 8 + 2 // Timestamp + Attempts
 )
 

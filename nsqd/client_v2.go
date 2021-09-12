@@ -13,7 +13,12 @@ import (
 	"github.com/golang/snappy"
 	"github.com/nsqio/nsq/internal/auth"
 )
+/**
+nsqd/client_v2.go文件，保存每个客户端的连接信息。
+clientV2实例由protocolV2.IOLoop()创建，每个连接均有一个独立的实例。
 
+
+*/
 const defaultBufferSize = 16 * 1024
 
 const (

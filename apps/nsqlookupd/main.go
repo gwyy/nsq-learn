@@ -42,6 +42,9 @@ type program struct {
 	nsqlookupd *nsqlookupd.NSQLookupd
 }
 
+/**
+入口函数 ，一样的 svc 控制
+ */
 func main() {
 	prg := &program{}
 	if err := svc.Run(prg, syscall.SIGINT, syscall.SIGTERM); err != nil {
@@ -58,6 +61,7 @@ func (p *program) Init(env svc.Environment) error {
 }
 
 func (p *program) Start() error {
+	//设置参数
 	opts := nsqlookupd.NewOptions()
 
 	flagSet := nsqlookupdFlagSet(opts)

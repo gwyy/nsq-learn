@@ -90,15 +90,16 @@ type Options struct {
 func NewOptions() *Options {
 	//获取主机名
 	hostname, err := os.Hostname()
-	if err != nil {
+	if err != nil { //如果报错，直接结束进程
 		log.Fatal(err)
 	}
 	//实例化md5
 	h := md5.New()
-	//写入到md5
+	//把主机名写入到md5
 	io.WriteString(h, hostname)
 	//计算出当前机器的id
 	defaultID := int64(crc32.ChecksumIEEE(h.Sum(nil)) % 1024)
+
 	//返回 newOptions 结构体指针 （一般我们都用指针比较方便)
 	return &Options{
 		ID:        defaultID,  //当前机器id
