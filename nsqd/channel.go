@@ -61,9 +61,10 @@ type Consumer interface {
 type Channel struct {
 	//	 放在前面保证 32 位系统对其
 	// 64bit atomic vars need to be first for proper alignment on 32bit platforms
-	requeueCount uint64
-	messageCount uint64
-	timeoutCount uint64
+
+	requeueCount uint64             // 重新消费的message 个数
+	messageCount uint64             // 消息总数
+	timeoutCount uint64             // 消费超时的message 个数
 
 	sync.RWMutex
 
@@ -88,17 +89,22 @@ type Channel struct {
 	e2eProcessingLatencyStream *quantile.Quantile
 
 	// TODO: these can be DRYd up	// 延迟队列相关的三个字段
-	deferredMessages map[MessageID]*pqueue.Item   // 保存尚未到时间的延迟消费消息
-	deferredPQ       pqueue.PriorityQueue        // 保存尚未到时间的延迟消费消息，最小堆
-	deferredMutex    sync.Mutex
+	deferredMessages map[MessageID]*pqueue.Item   // 保存尚未到时间的延迟消费消息  defer 消息保存的map
+	deferredPQ       pqueue.PriorityQueue        // 保存尚未到时间的延迟消费消息，最小堆 defer 队列 (优先队列保存)
+	deferredMutex    sync.Mutex  //相关的互斥锁
 	// 待确认队列相关的三个字段
 
 	//每个 channel 维持两个队列,一个发送待确认队列,
 	//一个延迟发送队列.
 	//二者均使用优先队列进行实现,且存储消息使用的 map 以 msgID 作为 key.二者的实现也不一样,后面慢慢讲
-	inFlightMessages map[MessageID]*Message    // 保存已推送尚未收到FIN的消息
-	inFlightPQ       inFlightPqueue             // 保存已推送尚未收到FIN的消息，最小堆
-	inFlightMutex    sync.Mutex
+	inFlightMessages map[MessageID]*Message    // 保存已推送尚未收到FIN的消息 正在消费的消息保存的map
+
+	//inFlightPQ 的 pri也是时间戳，是投递消息的超时时间）
+	//当消息发送出去之后，会进入in_flight_queue 队列
+	inFlightPQ       inFlightPqueue             // 保存已推送尚未收到FIN的消息，最小堆 正在消费的消息保存在优先队列 (优先队列保存)
+
+
+	inFlightMutex    sync.Mutex     //相关的互斥锁
 }
 /**
 在 channel 中存在两个优先队列,一个待确认队列,一个延迟队列.每个队列均由一个 Mutex,
@@ -561,6 +567,7 @@ func (c *Channel) RemoveClient(clientID int64) {
 	}
 }
 // 推送一条消息给客户端,等待确认,timeout 是确认超时时间
+//在发送给客户端之前，先把消息加入到 InFlight里面
 func (c *Channel) StartInFlightTimeout(msg *Message, clientID int64, timeout time.Duration) error {
 	now := time.Now()
 	msg.clientID = clientID
@@ -711,6 +718,8 @@ exit:
 	return dirty
 }
 // 在 NSQD 协程中进行处理,传入当前时间,处理 channel 中的待发送消息
+// inFlightPQ队列中储存了正在投递但还没确认投递成功的消息。  延迟时间60秒
+// t是当前时间戳
 func (c *Channel) processInFlightQueue(t int64) bool {
 	c.exitMutex.RLock()
 	defer c.exitMutex.RUnlock()
@@ -725,6 +734,7 @@ func (c *Channel) processInFlightQueue(t int64) bool {
 	for {
 		c.inFlightMutex.Lock()
 		// 判断待确认的消息是否超时,获取等待确认超时的一条消息
+		//用于判断根部的元素是否超过max，如果超过则返回nil，如果没有直接返回null
 		msg, _ := c.inFlightPQ.PeekAndShift(t)
 		c.inFlightMutex.Unlock()
 
@@ -732,9 +742,10 @@ func (c *Channel) processInFlightQueue(t int64) bool {
 			// 没有消息等待确认超时,就不需要处理待确认队列
 			goto exit
 		}
+		// 只要发送过消息，则标记此subchannel为dirty
 		dirty = true
-		// 清空到时消息
-
+		// 删除超时消息对应channel的inFlightMessages消息map
+		//从 channel InFlight拿到这条消息,如果有 表示超时没有确认，如果没有 就直接退出
 		_, err := c.popInFlightMessage(msg.clientID, msg.ID)
 		if err != nil {
 			goto exit
@@ -745,7 +756,7 @@ func (c *Channel) processInFlightQueue(t int64) bool {
 		client, ok := c.clients[msg.clientID]
 		c.RUnlock()
 		if ok {
-			// 消息超时后的客户端的处理
+			// 向超时消息对应client发送超时通知
 			client.TimedOutMessage()
 		}
 		// 重新投递消息,调用 put 表示立即发送

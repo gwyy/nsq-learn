@@ -79,7 +79,7 @@ type NSQD struct {
 	ci *clusterinfo.ClusterInfo   // 专门用来和 lookupd 通信
 }
 /**
-实例化一个 nsqd 对下
+实例化一个 nsqd 对象
  */
 func New(opts *Options) (*NSQD, error) {
 	var err error
@@ -99,7 +99,7 @@ func New(opts *Options) (*NSQD, error) {
 	n := &NSQD{
 		startTime:            time.Now(),
 		topicMap:             make(map[string]*Topic),  // 管理 topic 的 map
-		clients:              make(map[int64]Client),   // 管理所有客户端
+		clients:              make(map[int64]Client),   // 管理所有客户端,Client是接口，这里也是指针 现在用的是ClientV2
 		exitChan:             make(chan int),             // 退出通知管道
 		notifyChan:           make(chan interface{}),     // 通知 lookupd 的管道
 		optsNotificationChan: make(chan struct{}, 1),
@@ -295,12 +295,13 @@ func (n *NSQD) Main() error {
 	}
 	//设置上下文对象
 	n.tcpServer.ctx = ctx
-	//waitGroup  会开个协程   监听tcp连接 一直接受请求 accpet
+	//waitGroup开个协程 监听tcp连接 一直接受请求 accpet
 	n.waitGroup.Wrap(func() {
 		exitFunc(protocol.TCPServer(n.tcpListener, n.tcpServer, n.logf))
 	})
-	//监听http连接 初始化路由
+	//监听http连接 初始化所有的路由 roter
 	httpServer := newHTTPServer(ctx, false, n.getOpts().TLSRequired == TLSRequired)
+	//开了个协程  监听http
 	n.waitGroup.Wrap(func() {
 		//调用 http_api.Serve 开始启动 HTTPServer 并在 4151 端口进行 HTTP 通信.
 		exitFunc(http_api.Serve(n.httpListener, httpServer, "HTTP", n.logf))
@@ -308,6 +309,7 @@ func (n *NSQD) Main() error {
 	//如果 https配置不为空 那么监听 https 连接
 	if n.tlsConfig != nil && n.getOpts().HTTPSAddress != "" {
 		httpsServer := newHTTPServer(ctx, true, true)
+		//开了个协程
 		n.waitGroup.Wrap(func() {
 			exitFunc(http_api.Serve(n.httpsListener, httpsServer, "HTTPS", n.logf))
 		})
@@ -315,17 +317,17 @@ func (n *NSQD) Main() error {
 	//循环监控队列信息
 	//queueScanLoop
 	//n 个 queueScanWorker
+	//开了个协程  负责处理延迟消息
 	n.waitGroup.Wrap(n.queueScanLoop)    // 处理消息的优先队列
-	//节点信息管理
+	//开了个协程  节点信息管理
 	n.waitGroup.Wrap(n.lookupLoop)      // 如果 nsqd 发生变化，同步至 nsqloopdup，函数定义在 lookup 中
+
 	if n.getOpts().StatsdAddress != "" {
 		//统计信息
 		// 定时间 nsqd 的状态通过短链接的方式发送至一个状态监护进程中
 		// 包括 nsqd 的应用资源信息，以及 nsqd 上 topic 的信息
 		n.waitGroup.Wrap(n.statsdLoop)
 	}
-
-
 	//阻塞监听 exitCh  有问题直接返回
 	err := <-exitCh
 	return err
@@ -689,27 +691,27 @@ func (n *NSQD) channels() []*Channel {
 // 修改 pool（运行 queueScanWorker 的协程） 的大小
 // 参数: 每轮处理 channel 数量,channel 通道,反馈通道
 //修改运行 queueScanWorker() 函数的 goroutine 个数,真正的 channel 扫描发生在 queueScanWorker() 中,也是通过单独的 goroutine 进行运行的.
+//根据配置  增加或者减少对应的 work协程
 func (n *NSQD) resizePool(num int, workCh chan *Channel, responseCh chan bool, closeCh chan int) {
 	// num 是一次需要处理的 channel 个数
 	idealPoolSize := int(float64(num) * 0.25)
 	// idealPoolSize 范围 [1,4]
 	if idealPoolSize < 1 {
 		idealPoolSize = 1
-	} else if idealPoolSize > n.getOpts().QueueScanWorkerPoolMax {
+	} else if idealPoolSize > n.getOpts().QueueScanWorkerPoolMax { //默认4个
 		idealPoolSize = n.getOpts().QueueScanWorkerPoolMax
 	}
 	for {
+		//最终判断poolsize 是否和现有的相等， 不用改变 Pool 的大小
 		if idealPoolSize == n.poolSize {
-			// 不用改变 Pool 的大小
 			break
-		} else if idealPoolSize < n.poolSize {
-			// 关闭 queueScanWorker 协程直到剩余数量等于 idealPoolSize
+		} else if idealPoolSize < n.poolSize { // 关闭 queueScanWorker 协程直到剩余数量等于 idealPoolSize
 			// contract
 			closeCh <- 1   // 一次只关闭一个
 			n.poolSize--
 		} else {
 			// expand
-			// 添加 queueScanWorker 协程，直到数量等于 idealPoolSize
+			//开个协程 添加 queueScanWorker 协程，直到数量等于 idealPoolSize
 			n.waitGroup.Wrap(func() {
 				n.queueScanWorker(workCh, responseCh, closeCh)
 			})
@@ -736,6 +738,7 @@ func (n *NSQD) queueScanWorker(workCh chan *Channel, responseCh chan bool, close
 			if c.processInFlightQueue(now) {
 				dirty = true
 			}
+			//处理延迟消息
 			if c.processDeferredQueue(now) {
 				dirty = true
 			}
@@ -774,9 +777,24 @@ func (n *NSQD) queueScanWorker(workCh chan *Channel, responseCh chan bool, close
 默认的情况下,如果选中的 channel 中有 1/4 的channel 存在数据就不需要等待 100ms 的触发扫描,
 而是直接跳转到 loop 继续进行扫描,这是一个优化
 
+channel 有有两个重要队列： defer队列和inflight 队列, 事件处理主要是对两个队列的消息数据做处理
+
+扫描channel 规则
+更新 channels 的频率为100ms
+刷新表的频率为 5s
+默认随机选择20( queue-scan-selection-count ) 个channels 做消息队列调整
+默认处理队列的协程数量不超过 4 ( queue-scan-worker-pool-max )
+processInFlightQueue 做消息处理超时重发处理
+flight 队列中，保存的是推送到消费端的消息，优先队列中，按照time排序, 消息已经发送的时间越久越靠前
+定时从flight 队列中获取最久的消息，如果已超时( 超过 msg--time )，则将消息重新发送
+processDeferdQueue 处理延迟队列的消息
+deferd 队列中，保存的是延迟推送的消息，优先队列中，按照time排序，距离消息要发送的时间越短，越靠前
+定时从deferd 队列中获取最近需要发送的消息，如果消息已达到发送时间，则pop 消息，将消息发送
  */
 func (n *NSQD) queueScanLoop() {
+	//实例化Channel的 channel   20个缓冲区
 	workCh := make(chan *Channel, n.getOpts().QueueScanSelectionCount)
+	//实例化 bool的channel   20个缓冲区
 	responseCh := make(chan bool, n.getOpts().QueueScanSelectionCount)
 	closeCh := make(chan int)
 
@@ -791,14 +809,12 @@ func (n *NSQD) queueScanLoop() {
 
 	for {
 		select {
-		case <-workTicker.C:
-			// 100 ms 强制扫描 channel
+		case <-workTicker.C: // 100 ms 强制扫描 channel
 			if len(channels) == 0 {
 				continue
 			}
-		case <-refreshTicker.C:
+		case <-refreshTicker.C: // 每 5s 刷新 channel 并且更改 pool 的大小
 			channels = n.channels()
-			// 每 5s 刷新 channel 并且更改 pool 的大小
 			n.resizePool(len(channels), workCh, responseCh, closeCh)
 			continue
 		case <-n.exitChan:
@@ -830,6 +846,15 @@ func (n *NSQD) queueScanLoop() {
 		// 大于 1/4 的话不进行睡眠，继续运行，因为这时大量的 channel 需要处理
 		// TODO 这可能导致长时间 channels 得不到更新，因为如果一直处于忙碌状态的话
 		// 不会执行 select 即使 channel 发生了变化也不会更新
+		//脏的 除以 干净的      如果大于    0.25
+		//queueScanLoop的处理方法模仿了Redis的概率到期算法
+		//(probabilistic expiration algorithm)，
+		//每过一个QueueScanInterval(默认100ms)间隔，进行一次概率选择，
+		//从所有的channel缓存中随机选择QueueScanSelectionCount(默认20)个channel，
+		//如果某个被选中channel存在InFlighting消息或者Deferred消息，
+		//则认为该channel为“脏”channel。
+		//如果被选中channel中“脏”channel的比例大于QueueScanDirtyPercent(默认25%)，
+		//则不投入睡眠，直接进行下一次概率选择
 		if float64(numDirty)/float64(num) > n.getOpts().QueueScanDirtyPercent {
 			goto loop
 		}

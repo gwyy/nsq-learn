@@ -80,13 +80,15 @@ func (pq *PriorityQueue) Pop() interface{} {
 	*pq = (*pq)[0 : n-1]
 	return item
 }
-
+//max实参传入的是当前时间
 func (pq *PriorityQueue) PeekAndShift(max int64) (*Item, int64) {
 	if pq.Len() == 0 {
 		return nil, 0
 	}
 
 	item := (*pq)[0]
+	//存入延时消息时，Priority优先级就是消息的到期时间
+	//这里只有当前时间大于了消息的到期时间才回返回
 	if item.Priority > max {
 		return nil, item.Priority - max
 	}

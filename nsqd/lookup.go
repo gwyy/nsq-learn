@@ -75,6 +75,15 @@ func connectCallback(n *NSQD, hostname string) func(*lookupPeer) {
 	}
 }
 
+/**
+此处的事件循环，是用于和lookupd 交户使用的事件处理模块。例如Topic 增加或者删除，
+channel 增加或者删除 需要对所有 nslookupd 模块做消息广播等处理逻辑，均在此处实现。
+主要的事件:
+
+定时心跳操作 每隔 15s 发送 PING 到 所有 nslookupd 的节点上
+topic,channel新增删除操作 发送消息到所有 nslookupd 的节点上
+配置修改的操作 如果配置修改，会重新从配置中刷新一次 nslookupd 节点
+ */
 func (n *NSQD) lookupLoop() {
 	var lookupPeers []*lookupPeer
 	var lookupAddrs []string

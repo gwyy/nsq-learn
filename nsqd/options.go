@@ -37,7 +37,13 @@ type Options struct {
 	MaxBytesPerFile int64         `flag:"max-bytes-per-file"`
 	SyncEvery       int64         `flag:"sync-every"`
 	SyncTimeout     time.Duration `flag:"sync-timeout"`
-
+/*
+   QueueScanWorkerPoolMax就是最大协程数，默认是4，这个数是扫描全部channel的最大协程数，固然channel的数量小于这个参数的话，就调整协程的数量，以最小的为准，好比channel的数量为2个，而默认的是4个，那就调扫描的数量为2个
+   QueueScanSelectionCount 每次扫描最大的channel数量，默认是20，若是channel的数量小于这个值，则以channel的数量为准。
+   QueueScanDirtyPercent 标识脏数据 channel的百分比，默认为0.25，eg: channel数量为10,则一次最多扫描10个，查看每一个channel是否有过时的数据，若是有，则标记为这个channel是有脏数据的，若是有脏数据的channel的数量 占此次扫描的10个channel的比例超过这个百分比,则直接再次进行扫描一次，而不用等到下一次时间点。
+   QueueScanInterval 扫描channel的时间间隔，默认的是每100毫秒扫描一次。
+   QueueScanRefreshInterval 刷新扫描的时间间隔 目前的处理方式是调整channel的协程数量。 这也就是nsq处理过时数据的算法，总结一下就是，使用协程定时去扫描随机的channel里是否有过时数据。
+ */
 	QueueScanInterval        time.Duration
 	QueueScanRefreshInterval time.Duration
 	QueueScanSelectionCount  int `flag:"queue-scan-selection-count"`

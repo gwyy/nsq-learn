@@ -1,6 +1,7 @@
 package main
 
 import (
+	"encoding/json"
 	"flag"
 	"fmt"
 	"math/rand"
@@ -23,7 +24,17 @@ import (
 	"github.com/nsqio/nsq/nsqd"
 )
 
-
+/**
+json 打印测试方法
+ */
+func JsonExit(v interface{}) {
+	str,err := json.Marshal(v)
+	if err != nil {
+		panic(err)
+	}
+	fmt.Println(string(str))
+	os.Exit(1)
+}
 /**
 pub:  http://127.0.0.1:4151/pub?topic=name
  */
@@ -117,7 +128,7 @@ func (p *program) Start() error {
 			logFatal("failed to load config file %s - %s", configFile, err)
 		}
 	}
-	// 检查配置文件
+	// 检查配置文件  tls_min_version tls_required 等必填
 	cfg.Validate()
 	// 采用优先级从高到低依次进行解析，最终
 	options.Resolve(opts, flagSet, cfg)
