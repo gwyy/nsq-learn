@@ -82,6 +82,7 @@ func (p *program) Start() error {
 	}
 
 	options.Resolve(opts, flagSet, cfg)
+	//实例化 nsqlookupd
 	nsqlookupd, err := nsqlookupd.New(opts)
 	if err != nil {
 		logFatal("failed to instantiate nsqlookupd", err)
@@ -89,6 +90,7 @@ func (p *program) Start() error {
 	p.nsqlookupd = nsqlookupd
 
 	go func() {
+		//执行 main方法
 		err := p.nsqlookupd.Main()
 		if err != nil {
 			p.Stop()

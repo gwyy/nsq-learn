@@ -3,6 +3,7 @@ vendor
 build/
 .cover/
 .idea/
+main
 apps/nsqlookupd/nsqlookupd
 apps/nsqd/nsqd
 apps/nsqadmin/nsqadmin

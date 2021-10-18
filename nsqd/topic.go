@@ -41,7 +41,7 @@ type Topic struct {
 	messageCount uint64  // 累计消息数
 	messageBytes uint64// 累计消息体的字节数
 
-	sync.RWMutex  // 在 channel 的操作需要加锁，包括 putMessage
+	sync.RWMutex  // 加锁，包括 putMessage
 
 	name              string // topic名，生产和消费时需要指定此名称
 	channelMap        map[string]*Channel  // 保存每个channel name和channel指针的映射
@@ -66,7 +66,6 @@ type Topic struct {
 
 	paused    int32   // topic 是否暂停
 	pauseChan chan int   // 改变 topic 暂停/运行状态的通道
-
 	ctx *context  // topic 的上下文
 }
 

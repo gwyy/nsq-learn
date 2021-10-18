@@ -49,6 +49,8 @@ func newLookupPeer(addr string, maxBodySize int64, l lg.AppLogFunc, connectCallb
 
 // Connect will Dial the specified address, with timeouts
 func (lp *lookupPeer) Connect() error {
+	//LOOKUP connecting to 127.0.0.1:4160
+	//尝试链接
 	lp.logf(lg.INFO, "LOOKUP connecting to %s", lp.addr)
 	conn, err := net.DialTimeout("tcp", lp.addr, time.Second)
 	if err != nil {
@@ -93,16 +95,20 @@ func (lp *lookupPeer) Close() error {
 func (lp *lookupPeer) Command(cmd *nsq.Command) ([]byte, error) {
 	initialState := lp.state
 	if lp.state != stateConnected {
+		//尝试链接 lp.conn
 		err := lp.Connect()
 		if err != nil {
 			return nil, err
 		}
+		//标记链接成功
 		lp.state = stateConnected
+		//发送  V1
 		_, err = lp.Write(nsq.MagicV1)
 		if err != nil {
 			lp.Close()
 			return nil, err
 		}
+		//调用链接的callback方法
 		if initialState == stateDisconnected {
 			lp.connectCallback(lp)
 		}

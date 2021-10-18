@@ -65,7 +65,6 @@ func (p *LookupProtocolV1) IOLoop(conn net.Conn) error {
 			}
 		}
 	}
-
 	conn.Close()
 	p.ctx.nsqlookupd.logf(LOG_INFO, "CLIENT(%s): closing", client)
 	if client.peerInfo != nil {
@@ -212,6 +211,7 @@ func (p *LookupProtocolV1) IDENTIFY(client *ClientV1, reader *bufio.Reader, para
 
 	// body is a json structure with producer information
 	peerInfo := PeerInfo{id: client.RemoteAddr().String()}
+	//unmarshal 成功就表示注册成功
 	err = json.Unmarshal(body, &peerInfo)
 	if err != nil {
 		return nil, protocol.NewFatalClientErr(err, "E_BAD_BODY", "IDENTIFY failed to decode JSON body")
@@ -229,6 +229,7 @@ func (p *LookupProtocolV1) IDENTIFY(client *ClientV1, reader *bufio.Reader, para
 	p.ctx.nsqlookupd.logf(LOG_INFO, "CLIENT(%s): IDENTIFY Address:%s TCP:%d HTTP:%d Version:%s",
 		client, peerInfo.BroadcastAddress, peerInfo.TCPPort, peerInfo.HTTPPort, peerInfo.Version)
 
+	//写入到 client DB里
 	client.peerInfo = &peerInfo
 	if p.ctx.nsqlookupd.DB.AddProducer(Registration{"client", "", ""}, &Producer{peerInfo: client.peerInfo}) {
 		p.ctx.nsqlookupd.logf(LOG_INFO, "DB: client(%s) REGISTER category:%s key:%s subkey:%s", client, "client", "", "")
@@ -261,6 +262,7 @@ func (p *LookupProtocolV1) PING(client *ClientV1, params []string) ([]byte, erro
 		now := time.Now()
 		p.ctx.nsqlookupd.logf(LOG_INFO, "CLIENT(%s): pinged (last ping %s)", client.peerInfo.id,
 			now.Sub(cur))
+		//修改lastUpdate 时间
 		atomic.StoreInt64(&client.peerInfo.lastUpdate, now.UnixNano())
 	}
 	return []byte("OK"), nil

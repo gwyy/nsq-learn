@@ -653,7 +653,9 @@ func (n *NSQD) Notify(v interface{}) {
 		// by selecting on exitChan we guarantee that
 		// we do not block exit, see issue #123
 		select {
+		//如果执行那一刻 有exitChan 那么就走exit
 		case <-n.exitChan:
+			//否则就走正常逻辑 往notifyChan 里发个消息
 		case n.notifyChan <- v:
 			if !persist {
 				return
